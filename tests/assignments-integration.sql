@@ -1,0 +1,43 @@
+-- Owner-run verification; every assignment and submission is rolled back.
+begin;
+select set_config('request.jwt.claim.sub',(select user_id::text from public.portal_admins where active limit 1),true);
+set local role authenticated;
+do $$
+declare admin_id uuid:=auth.uid(); person public.members; aid uuid; sid uuid; stamp timestamptz; denied boolean; director_user uuid; recipient_count int;
+begin
+ select * into person from public.members where auth_user_id is not null and program_status='active' limit 1;
+ if person.id is null then raise exception 'A linked active member is needed'; end if;
+ select d.auth_user_id into director_user from public.directors d join public.director_assignments da on da.director_id=d.id where d.active and da.active and da.cohort_id=person.cohort_id and 'content'=any(da.capabilities) and d.auth_user_id is not null and (da.start_date is null or da.start_date<=current_date) and (da.end_date is null or da.end_date>=current_date) limit 1;
+ aid:=public.portal_assignment('save',null,jsonb_build_object('cohort_id',person.cohort_id,'title','Assignment test (rolled back)','deadline',now()+interval '1 day','active',true,'targeted',true,'recipients',jsonb_build_array(person.id)));
+ perform set_config('request.jwt.claim.sub',person.auth_user_id::text,true);
+ if not exists(select 1 from public.student_assignments where id=aid) then raise exception 'Recipient cannot see assignment'; end if;
+ sid:=public.portal_assignment('submit',aid,jsonb_build_object('method','text','content','Initial response'));
+ select submitted_at into stamp from public.assignment_submissions where id=sid;
+ perform set_config('request.jwt.claim.sub','00000000-0000-0000-0000-000000000000',true);
+ if exists(select 1 from public.student_assignments where id=aid) or exists(select 1 from public.assignment_submissions where id=sid) then raise exception 'Nonrecipient can read private coursework'; end if;
+ denied:=false;
+ begin perform public.portal_assignment('submit',aid,jsonb_build_object('method','text','content','Unauthorized')); exception when others then if sqlerrm='Assignment unavailable' then denied:=true;else raise;end if;end;
+ if not denied then raise exception 'Unauthorized submission accepted';end if;
+ perform set_config('request.jwt.claim.sub',coalesce(director_user,admin_id)::text,true);
+ perform public.portal_assignment('review',sid,jsonb_build_object('status','denied','feedback','Please revise','expected_submitted_at',stamp));
+ if not exists(select 1 from public.assignment_submissions where id=sid and status='denied' and feedback='Please revise') then raise exception 'Feedback review failed';end if;
+ perform set_config('request.jwt.claim.sub',person.auth_user_id::text,true);
+ if not exists(select 1 from public.assignment_submissions where id=sid and feedback='Please revise') then raise exception 'Student cannot read feedback';end if;
+ perform public.portal_assignment('submit',aid,jsonb_build_object('method','link','content','https://example.invalid/revised'));
+ if not exists(select 1 from public.assignment_submissions where id=sid and status='pending') then raise exception 'Resubmission did not return to pending';end if;
+ denied:=false;
+ begin perform public.portal_assignment('remove',aid);exception when others then if sqlerrm='Assignment management access required' then denied:=true;else raise;end if;end;
+ if not denied then raise exception 'Student can remove assignment';end if;
+ perform set_config('request.jwt.claim.sub',coalesce(director_user,admin_id)::text,true);
+ denied:=false;
+ begin perform public.portal_assignment('review',sid,jsonb_build_object('status','completed','expected_submitted_at',stamp));exception when others then if sqlerrm='The student resubmitted. Refresh before reviewing.' then denied:=true;else raise;end if;end;
+ if not denied then raise exception 'Outdated review accepted';end if;
+ select submitted_at into stamp from public.assignment_submissions where id=sid;
+ perform public.portal_assignment('review',sid,jsonb_build_object('status','completed','feedback','Great work','expected_submitted_at',stamp));
+ perform public.portal_assignment('save',aid,jsonb_build_object('title','Updated test','deadline',now()+interval '2 days','active',true,'targeted',false));
+ if not exists(select 1 from public.student_assignments where id=aid and title='Updated test' and not targeted and deadline>now()+interval '1 day') then raise exception 'Deadline update failed';end if;
+ perform public.portal_assignment('remove',aid);
+ if exists(select 1 from public.student_assignments where id=aid) or exists(select 1 from public.assignment_submissions where id=sid) then raise exception 'Removal did not cascade';end if;
+end $$;
+select true as assignments_visibility_submission_feedback_resubmission_deadline_removal_checks_passed;
+rollback;

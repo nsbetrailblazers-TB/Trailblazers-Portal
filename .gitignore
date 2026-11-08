@@ -1,0 +1,14 @@
+.vercel/
+.tools/
+.npm-cache/
+node_modules/
+.env*
+release/
+tmp/
+supabase/.temp/
+/idk
+tests/*-preview.png
+tests/*-before.png
+
+.vercel
+.env*

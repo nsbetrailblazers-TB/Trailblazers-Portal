@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Workbook import verification</title><h1>Workbook import verification</h1><button id="run">Run import checks</button><pre id="result" role="status"></pre><script src="/spreadsheet-import.js"></script><script src="/portal-utils.js"></script><script>
+const enc=new TextEncoder();
+async function workbook(formula=false,compressed=false){
+ const entries={
+  'xl/workbook.xml':'<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Roster" r:id="rId1"/></sheets></workbook>',
+  'xl/_rels/workbook.xml.rels':'<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>',
+  'xl/sharedStrings.xml':'<sst><si><t>Maya</t></si></sst>',
+  'xl/worksheets/sheet1.xml':`<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>first_name</t></is></c><c r="B1" t="inlineStr"><is><t>last_name</t></is></c><c r="C1" t="inlineStr"><is><t>uf_email</t></is></c><c r="D1" t="inlineStr"><is><t>cohort</t></is></c></row><row><c r="A2" t="s"><v>0</v></c><c r="B2" t="inlineStr"><is><t>Smith</t></is></c><c r="C2" t="inlineStr"><is><t>maya@example.invalid</t></is></c><c r="D2">${formula?'<f>2+3</f>':''}<v>5</v></c></row></sheetData></worksheet>`
+ };
+ const parts=[],directory=[];let offset=0;
+ for(const [name,text] of Object.entries(entries)){
+  const n=enc.encode(name),raw=enc.encode(text),body=compressed?new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer()):raw;
+  const header=new Uint8Array(30+n.length),h=new DataView(header.buffer);h.setUint32(0,0x04034b50,true);h.setUint16(8,compressed?8:0,true);h.setUint32(18,body.length,true);h.setUint32(22,raw.length,true);h.setUint16(26,n.length,true);header.set(n,30);parts.push(header,body);
+  const central=new Uint8Array(46+n.length),c=new DataView(central.buffer);c.setUint32(0,0x02014b50,true);c.setUint16(10,compressed?8:0,true);c.setUint32(20,body.length,true);c.setUint32(24,raw.length,true);c.setUint16(28,n.length,true);c.setUint32(42,offset,true);central.set(n,46);directory.push(central);offset+=header.length+body.length;
+ }
+ const end=new Uint8Array(22),e=new DataView(end.buffer);e.setUint32(0,0x06054b50,true);e.setUint16(10,directory.length,true);e.setUint32(16,offset,true);return new File([...parts,...directory,end],'roster.xlsx');
+}
+document.getElementById('run').onclick=async()=>{const results=[];try{
+ for(const compressed of [false,true]){const csv=await PortalSpreadsheet.read(await workbook(false,compressed));const rows=PortalUtils.parseCSV(csv);if(rows[0].first_name!=='Maya'||rows[0].cohort!=='5')throw Error('Incorrect workbook values');results.push('PASS: '+(compressed?'compressed':'stored')+' XLSX, shared strings, inline strings, numeric cohort');}
+ let rejected=false;try{await PortalSpreadsheet.read(await workbook(true));}catch{rejected=true;}if(!rejected)throw Error('Formula was accepted');results.push('PASS: formula rejection');
+ rejected=false;try{await PortalSpreadsheet.read(new File(['bad archive'],'bad.xlsx'));}catch{rejected=true;}if(!rejected)throw Error('Corrupt archive was accepted');results.push('PASS: corrupt workbook rejection');
+ }catch(e){results.push('FAIL: '+e.message);}document.getElementById('result').textContent=results.join('\n');};
+</script></html>

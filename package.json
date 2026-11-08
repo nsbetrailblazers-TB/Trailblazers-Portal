@@ -1,0 +1,10 @@
+{
+  "name": "trailblazers-portal",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "dev": "node scripts/serve.cjs",
+    "test": "node --test tests/portal-utils.test.cjs tests/director-regression.test.cjs tests/calendar-banner.test.cjs tests/email-preferences.test.cjs tests/assignments.test.cjs tests/activity-completion.test.cjs tests/event-notifications.test.cjs tests/admin-one-on-one-control.test.cjs"
+  }
+}

@@ -1,0 +1,14 @@
+.git
+.codex
+.agents
+.env*
+supabase
+tests
+release
+*.md
+*.zip
+node_modules
+.tools
+.npm-cache
+tmp
+idk

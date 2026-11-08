@@ -1,0 +1,35 @@
+begin;
+do $$
+declare au uuid:=gen_random_uuid(); mu uuid:=gen_random_uuid(); du uuid:=gen_random_uuid(); cid uuid; oldcid uuid; mid uuid; mid2 uuid; did uuid; aid uuid; ann uuid; rejected boolean;
+begin
+ insert into auth.users(id,email,email_confirmed_at) values(au,'ready-admin@example.invalid',now()),(mu,'ready-member@example.invalid',now()),(du,'ready-director@example.invalid',now());
+ insert into public.portal_admins(user_id) values(au);
+ insert into public.cohorts(name,class_number,status) values('__readiness',99111,'active') returning id into cid;
+ insert into public.cohorts(name,class_number,status) values('__readiness_old',99112,'archived') returning id into oldcid;
+ insert into public.members(first_name,last_name,uf_email,cohort_id,auth_user_id,program_status) values('Ready','Member','ready-member@example.invalid',cid,mu,'active') returning id into mid;
+ insert into public.members(first_name,last_name,uf_email,cohort_id,program_status) values('Ready','Other','ready-other@example.invalid',cid,'active') returning id into mid2;
+ insert into public.directors(first_name,last_name,email,auth_user_id,active) values('Ready','Director','ready-director@example.invalid',du,true) returning id into did;
+ insert into public.director_assignments(director_id,cohort_id,title,active,capabilities) values(did,cid,'Director',true,array['points','resumes']) returning id into aid;
+ insert into public.announcements(title,body,cohort_id,publish_at,active) values('Readiness notice','Body',cid,now(),true) returning id into ann;
+ if (select count(*) from public.member_notifications where dedupe_key like 'announcement:'||ann||':%')<>2 then raise exception 'Announcement did not reach both members'; end if;
+ update public.announcements set title='Edited readiness notice' where id=ann;
+ if (select count(*) from public.member_notifications where dedupe_key like 'announcement:'||ann||':%')<>2 then raise exception 'Duplicate announcement'; end if;
+ insert into public.announcements(title,body,cohort_id,publish_at,active) values('Future notice','Body',cid,now()+interval '2 days',true) returning id into ann;
+ if exists(select 1 from public.member_notifications where dedupe_key like 'announcement:'||ann||':%') then raise exception 'Future announcement leaked'; end if;
+ perform set_config('request.jwt.claims',jsonb_build_object('sub',mu,'role','authenticated')::text,true);
+ perform set_config('role','authenticated',true);
+ rejected:=false;begin perform public.portal_close_director(did);exception when others then rejected:=true;end;
+ if not rejected then raise exception 'Member could close a director';end if;
+ rejected:=false;begin perform public.portal_points_document('save','nonexistent.pdf');exception when others then rejected:=true;end;
+ if not rejected then raise exception 'Member could replace rules';end if;
+ perform public.portal_workspace('preferences',null,'{"email_enabled":false,"meeting_email_enabled":false}');
+ if (select email_enabled from public.member_notification_preferences where member_id=mid) then raise exception 'Preferences not saved';end if;
+ perform set_config('request.jwt.claims',jsonb_build_object('sub',au,'role','authenticated')::text,true);
+ perform public.portal_mutate('member',null,jsonb_build_object('first_name','Historical','last_name','Member','uf_email','ready-history@example.invalid','cohort_id',oldcid,'program_status','archived'));
+ perform public.portal_close_director(did);
+ if exists(select 1 from public.directors where id=did and active) or exists(select 1 from public.director_assignments where id=aid and active) then raise exception 'Director closure incomplete';end if;
+ if not exists(select 1 from public.directors where id=did) then raise exception 'Director history deleted';end if;
+ perform set_config('request.jwt.claims',jsonb_build_object('sub',du,'role','authenticated')::text,true);
+ if exists(select 1 from public.members where id=mid) then raise exception 'Closed director retains roster access';end if;
+end $$;
+rollback;

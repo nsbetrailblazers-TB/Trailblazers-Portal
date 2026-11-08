@@ -1,0 +1,42 @@
+-- Integration checks for expanded inventory, using rollback-only synthetic records.
+begin;
+do $$
+declare au uuid:=gen_random_uuid();du uuid:=gen_random_uuid();cid uuid;mid uuid;did uuid;sid uuid;eid uuid;r jsonb;denied boolean;first_count integer;
+begin
+ insert into auth.users(id,email,email_confirmed_at) values(au,'inventory-admin@example.invalid',now()),(du,'inventory-director@example.invalid',now());
+ insert into public.portal_admins(user_id) values(au);
+ perform set_config('request.jwt.claims',jsonb_build_object('sub',au,'role','authenticated')::text,true);
+ perform set_config('role','authenticated',true);
+ cid:=public.portal_mutate('cohort',null,'{"name":"__inventory_test","class_number":900009,"point_requirement":35}');
+ r:=public.portal_workspace('member_save',null,jsonb_build_object('cohort_id',cid,'first_name','Inventory','last_name','Member','uf_email','inventory-member@example.invalid','major','Engineering','minor','Math','graduation_year',2030,'preferred_contact_method','email','birthday_month',1,'birthday_day',1,'food_allergies','Test allergy','accommodations','Test access','show_in_alumni_directory',true));
+ mid:=(r->>'id')::uuid;
+ if (select major from public.members where id=mid)<>'Engineering' then raise exception 'FAIL: extended atomic roster'; end if;
+ r:=public.portal_workspace('profile_read',mid);
+ if r->>'accommodations'<>'Test access' then raise exception 'FAIL: atomic care fields'; end if;
+ perform public.portal_workspace('director_import',null,jsonb_build_object('rows',jsonb_build_array(jsonb_build_object('first_name','Inventory','last_name','Director','email','inventory-director@example.invalid','title','Director','cohort_id',cid))));
+ select id into did from public.directors where email='inventory-director@example.invalid';
+ if not exists(select 1 from public.one_on_ones where member_id=mid and director_id=did) then raise exception 'FAIL: imported assignment requirement'; end if;
+ sid:=public.portal_mutate('strike',null,jsonb_build_object('member_id',mid,'reason','Test'));
+ perform public.portal_mutate('strike',sid,'{"status":"resolved","resolution_note":"Resolved for test"}');
+ if (select status from public.strikes where id=sid)<>'resolved' then raise exception 'FAIL: resolved strike'; end if;
+ eid:=public.portal_save_event(null,jsonb_build_object('cohort_id',cid,'title','Inventory event','event_category','tb_event','start_time',now()+interval '6 hours','location_tbd',true,'dress_code','Casual','what_to_bring','Notebook','meeting_type','Workshop'));
+ if not exists(select 1 from public.meetings where id=eid and location_tbd and dress_code='Casual' and what_to_bring='Notebook') then raise exception 'FAIL: full event fields'; end if;
+ perform set_config('request.jwt.claims',jsonb_build_object('sub',du,'role','authenticated')::text,true);
+ perform public.portal_initialize();
+ perform public.portal_workspace('rule',null,jsonb_build_object('cohort_id',cid,'name','Scoped test rule','default_points',3,'active',true));
+ denied:=false;begin perform public.portal_workspace('rule',null,'{"name":"Forbidden global rule","default_points":3}');exception when others then denied:=true;end;
+ if not denied then raise exception 'FAIL: director edited global point rules'; end if;
+ perform set_config('request.jwt.claims',jsonb_build_object('sub',au,'role','authenticated')::text,true);
+ perform public.portal_mutate('settings',null,'{"setting_key":"alumni_directory_enabled","setting_value":{"value":false}}');
+ if exists(select 1 from public.portal_alumni_extended()) then raise exception 'FAIL: alumni disable setting'; end if;
+ perform public.portal_mutate('settings',null,'{"setting_key":"reminders_enabled","setting_value":{"value":true}}');
+ perform set_config('role','postgres',true);
+ perform set_config('request.jwt.claims','{}',true);
+ perform portal_private.scheduled_reminders();
+ select count(*) into first_count from public.member_notifications where member_id=mid;
+ if not exists(select 1 from public.member_notifications where member_id=mid and dedupe_key like 'event:'||eid||':%') then raise exception 'FAIL: event reminder queue'; end if;
+ perform portal_private.scheduled_reminders();
+ if (select count(*) from public.member_notifications where member_id=mid)<>first_count then raise exception 'FAIL: duplicate scheduled reminders'; end if;
+end $$;
+rollback;
+select 'PASS: atomic full roster/care, director import and seeding, strike resolution, full events, scoped point rules, live settings, scheduled queues and deduplication (rolled back)' as result;
